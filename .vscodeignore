@@ -1,0 +1,8 @@
+.vscode/**
+src/**
+tsconfig.json
+**/*.map
+.gitignore
+# NOTE: do not exclude node_modules/** here — pdfkit is a runtime
+# dependency and must be bundled. vsce already strips devDependencies
+# automatically.
