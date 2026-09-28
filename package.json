@@ -1,0 +1,70 @@
+{
+  "name": "khayyam-timer",
+  "displayName": "Khayyam Timer",
+  "description": "A stopwatch in the status bar that tracks how long you work on each project and git branch, with a plain-text report.",
+  "version": "0.0.1",
+  "publisher": "milad-ahmadi",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dima-AH/Khayyam-Timer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Dima-AH/Khayyam-Timer/issues"
+  },
+  "homepage": "https://github.com/Dima-AH/Khayyam-Timer#readme",
+  "galleryBanner": {
+    "color": "#4f46e5",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "timer",
+    "stopwatch",
+    "time tracking",
+    "productivity",
+    "git branch",
+    "timesheet"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "khayyamTimer.toggle",
+        "title": "Khayyam Timer: Start / Pause"
+      },
+      {
+        "command": "khayyamTimer.reset",
+        "title": "Khayyam Timer: Reset"
+      },
+      {
+        "command": "khayyamTimer.report",
+        "title": "Khayyam Timer: Export Report (txt)"
+      },
+      {
+        "command": "khayyamTimer.clearHistory",
+        "title": "Khayyam Timer: Clear History"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
