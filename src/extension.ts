@@ -9,10 +9,13 @@ interface Entry {
   branch: string;
   start: number;
   end: number;
+  description?: string;
 }
 
 const LOG_KEY = 'khayyamTimer.log';
 const ELAPSED_KEY = 'khayyamTimer.elapsedMs';
+const TASK_START_KEY = 'khayyamTimer.taskStartedAt';
+const CONFIG_SECTION = 'khayyamTimer';
 
 const pad = (n: number) => String(n).padStart(2, '0');
 
@@ -33,15 +36,33 @@ export async function activate(context: vscode.ExtensionContext) {
   let runningSince: number | undefined;
   let segStart = 0;
   let branch = 'no-git';
+  // Marks where the "current task" begins in the log, so Finish can tag
+  // only the entries that belong to it (a task may span several branches
+  // and several pause/resume cycles).
+  let taskStartedAt = context.workspaceState.get<number>(TASK_START_KEY, Date.now());
+
+  // ---------- Idle auto-pause ----------
+  // VS Code extensions can only see activity *inside* the editor (typing,
+  // cursor moves, scrolling, tab/focus changes) — there's no API for
+  // system-wide keyboard/mouse events. That's the best proxy available for
+  // "the person forgot the timer was running".
+  let lastActivity = Date.now();
+  let autoPaused = false; // true only when the current pause was caused by idling
+  const idleMs = () =>
+    Math.max(1, vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>('idleMinutes', 5)) * 60_000;
 
   // ---------- Status bar ----------
   const timerItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   const playItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
-  const resetItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
-  const reportItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+  const finishItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+  const resetItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+  const reportItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 96);
 
   timerItem.command = 'khayyamTimer.toggle';
   playItem.command = 'khayyamTimer.toggle';
+  finishItem.command = 'khayyamTimer.finish';
+  finishItem.text = '$(check)';
+  finishItem.tooltip = 'Finish task (stop and optionally describe what you did)';
   resetItem.command = 'khayyamTimer.reset';
   resetItem.text = '$(refresh)';
   resetItem.tooltip = 'Reset timer';
@@ -50,15 +71,19 @@ export async function activate(context: vscode.ExtensionContext) {
   reportItem.tooltip = 'Export work report';
 
   [timerItem, playItem, resetItem, reportItem].forEach((i) => i.show());
+  // finishItem is only shown while the timer is running (see render()).
 
   const total = () => elapsedMs + (runningSince !== undefined ? Date.now() - runningSince : 0);
 
   const render = () => {
     const running = runningSince !== undefined;
-    timerItem.text = `$(clock) ${fmt(total())}`;
-    timerItem.tooltip = `${project} • ${branch}`;
+    timerItem.text = autoPaused ? `$(debug-pause) ${fmt(total())} (idle)` : `$(clock) ${fmt(total())}`;
+    timerItem.tooltip = autoPaused
+      ? `${project} • ${branch} — auto-paused after inactivity, resumes on activity`
+      : `${project} • ${branch}`;
     playItem.text = running ? '$(debug-pause)' : '$(play)';
-    playItem.tooltip = running ? 'Pause' : 'Start';
+    playItem.tooltip = running ? 'Pause' : autoPaused ? 'Resume (auto-paused after inactivity)' : 'Start';
+    if (running) finishItem.show(); else finishItem.hide();
   };
 
   // ---------- Log ----------
@@ -84,6 +109,8 @@ export async function activate(context: vscode.ExtensionContext) {
   const start = () => {
     runningSince = Date.now();
     segStart = runningSince;
+    lastActivity = Date.now();
+    autoPaused = false;
     render();
   };
 
@@ -96,11 +123,92 @@ export async function activate(context: vscode.ExtensionContext) {
     render();
   };
 
+  // Same mechanics as pause(), but marks the pause as idle-caused so that
+  // the next bit of activity resumes it automatically — a manual pause
+  // never gets auto-resumed.
+  const autoPause = () => {
+    if (runningSince === undefined || autoPaused) return;
+    pause();
+    autoPaused = true;
+    render();
+    vscode.window.setStatusBarMessage(
+      `$(debug-pause) Khayyam Timer: auto-paused after ${idleMs() / 60_000} min of inactivity`,
+      6000
+    );
+  };
+
+  const checkIdle = () => {
+    if (runningSince === undefined || autoPaused) return;
+    if (Date.now() - lastActivity >= idleMs()) autoPause();
+  };
+
+  // Any activity inside the editor counts: typing, moving the cursor,
+  // scrolling, switching tabs, or the window regaining focus.
+  const bumpActivity = () => {
+    lastActivity = Date.now();
+    if (autoPaused) {
+      start(); // resumes exactly where it left off; elapsedMs is untouched
+      vscode.window.setStatusBarMessage('$(play) Khayyam Timer: resumed after activity', 4000);
+    }
+  };
+
+  const setTaskStart = (t: number) => {
+    taskStartedAt = t;
+    void context.workspaceState.update(TASK_START_KEY, t);
+  };
+
   const reset = () => {
     if (runningSince !== undefined) flush();
     runningSince = undefined;
+    autoPaused = false;
     elapsedMs = 0;
     void context.workspaceState.update(ELAPSED_KEY, 0);
+    setTaskStart(Date.now());
+    render();
+  };
+
+  // Stops the timer completely, optionally asks what the work was, exports a
+  // report for just this task, and — if that export actually completes —
+  // removes those entries from history so the next task starts with a clean
+  // slate. (If the export is cancelled, nothing is lost: the entries stay in
+  // history and can still be exported later from the 📄 button.)
+  const finishTask = async () => {
+    if (runningSince === undefined) return;
+    flush();
+    runningSince = undefined;
+    autoPaused = false;
+    void context.workspaceState.update(ELAPSED_KEY, 0);
+    render();
+
+    const description = await vscode.window.showInputBox({
+      prompt: 'What did you work on during this time? (optional)',
+      placeHolder: 'e.g. Fixed login validation bug',
+      ignoreFocusOut: true,
+    });
+
+    let log = readLog();
+    const isThisTask = (e: Entry) => e.project === project && e.start >= taskStartedAt;
+
+    if (description && description.trim()) {
+      for (const e of log) {
+        if (isThisTask(e)) e.description = description.trim();
+      }
+      void context.globalState.update(LOG_KEY, log);
+    }
+
+    const taskLog = log.filter(isThisTask);
+    if (taskLog.length > 0) {
+      const exported = await doExport(taskLog);
+      if (exported) {
+        log = readLog().filter((e) => !isThisTask(e));
+        void context.globalState.update(LOG_KEY, log);
+      }
+    } else {
+      vscode.window.showInformationMessage('Khayyam Timer: less than a second recorded, nothing to export.');
+    }
+
+    elapsedMs = 0;
+    setTaskStart(Date.now());
     render();
   };
 
@@ -146,7 +254,7 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 
   // ---------- Shared report data ----------
-  // Precomputes the same groupings for all three export formats, so txt/csv/pdf
+  // Precomputes the same groupings for all export formats, so txt/xlsx/pdf
   // always agree with each other.
   function summarize(log: Entry[]) {
     const projects = [...new Set(log.map((e) => e.project))];
@@ -206,8 +314,9 @@ export async function activate(context: vscode.ExtensionContext) {
     lines.push('SESSIONS');
     lines.push('-'.repeat(50));
     for (const e of log) {
+      const desc = e.description ? `  — ${e.description}` : '';
       lines.push(
-        `${fmtDateTime(e.start)} -> ${fmtDateTime(e.end)}  ${fmt(e.end - e.start)}  ${e.project} / ${e.branch}`
+        `${fmtDateTime(e.start)} -> ${fmtDateTime(e.end)}  ${fmt(e.end - e.start)}  ${e.project} / ${e.branch}${desc}`
       );
     }
     return lines.join('\n') + '\n';
@@ -244,17 +353,17 @@ export async function activate(context: vscode.ExtensionContext) {
     out += '\r\n';
 
     out += csvRow(['Sessions']);
-    out += csvRow(['Start', 'End', 'Duration', 'Project', 'Branch']);
+    out += csvRow(['Start', 'End', 'Duration', 'Project', 'Branch', 'Description']);
     for (const e of log) {
-      out += csvRow([fmtDateTime(e.start), fmtDateTime(e.end), fmt(e.end - e.start), e.project, e.branch]);
+      out += csvRow([fmtDateTime(e.start), fmtDateTime(e.end), fmt(e.end - e.start), e.project, e.branch, e.description ?? '']);
     }
     return out;
   };
 
   // ---------- PDF ----------
   // Uses pdfkit's built-in font, which only supports Latin/ASCII characters.
-  // Project and branch names with Persian/Arabic script will not render
-  // correctly here — use the TXT or CSV export for those instead.
+  // Project, branch or description text with Persian/Arabic script will not
+  // render correctly here — use the TXT or Excel export for those instead.
   const buildPdf = (log: Entry[], targetPath: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       const s = summarize(log);
@@ -298,7 +407,8 @@ export async function activate(context: vscode.ExtensionContext) {
       doc.moveDown(0.3);
       doc.fontSize(9);
       for (const e of log) {
-        doc.text(`${fmtDateTime(e.start)} -> ${fmtDateTime(e.end)}   ${fmt(e.end - e.start)}   ${e.project} / ${e.branch}`);
+        const desc = e.description ? `   — ${e.description}` : '';
+        doc.text(`${fmtDateTime(e.start)} -> ${fmtDateTime(e.end)}   ${fmt(e.end - e.start)}   ${e.project} / ${e.branch}${desc}`);
       }
 
       doc.end();
@@ -306,12 +416,13 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   // ---------- Export (asks the user which format to use) ----------
-  const exportReport = async () => {
-    flush(); // include the segment that is currently running
-    const log = readLog();
+  // Shared by the report button and by "Finish task". Returns true only if a
+  // file was actually written (lets the caller know whether it's safe to
+  // clear history afterwards).
+  const doExport = async (log: Entry[]): Promise<boolean> => {
     if (log.length === 0) {
-      vscode.window.showInformationMessage('Khayyam Timer: no time has been recorded yet.');
-      return;
+      vscode.window.showInformationMessage('Khayyam Timer: nothing to export yet.');
+      return false;
     }
 
     const choice = await vscode.window.showQuickPick(
@@ -322,7 +433,7 @@ export async function activate(context: vscode.ExtensionContext) {
       ],
       { placeHolder: 'Choose a report format' }
     );
-    if (!choice) return;
+    if (!choice) return false;
 
     const ext = choice.value;
     const filters: Record<string, string[]> =
@@ -332,7 +443,7 @@ export async function activate(context: vscode.ExtensionContext) {
       defaultUri: vscode.Uri.file(path.join(os.homedir(), `khayyam-timer-report.${ext}`)),
       filters,
     });
-    if (!target) return;
+    if (!target) return false;
 
     if (ext === 'txt') {
       fs.writeFileSync(target.fsPath, buildTxt(log), 'utf8');
@@ -349,6 +460,14 @@ export async function activate(context: vscode.ExtensionContext) {
     } else {
       await vscode.env.openExternal(target);
     }
+    return true;
+  };
+
+  // The 📄 status bar button / command: exports whatever is currently in
+  // history, on demand, without touching the timer or clearing anything.
+  const exportReport = async () => {
+    flush(); // include the segment that is currently running
+    await doExport(readLog());
   };
 
   const clearHistory = async () => {
@@ -366,13 +485,29 @@ export async function activate(context: vscode.ExtensionContext) {
   // ---------- Wiring ----------
   context.subscriptions.push(
     vscode.commands.registerCommand('khayyamTimer.toggle', () => (runningSince === undefined ? start() : pause())),
+    vscode.commands.registerCommand('khayyamTimer.finish', finishTask),
     vscode.commands.registerCommand('khayyamTimer.reset', reset),
     vscode.commands.registerCommand('khayyamTimer.report', exportReport),
     vscode.commands.registerCommand('khayyamTimer.clearHistory', clearHistory),
-    timerItem, playItem, resetItem, reportItem
+    timerItem, playItem, finishItem, resetItem, reportItem
   );
 
-  const interval = setInterval(render, 1000);
+  // Activity that counts toward the idle timer: typing, moving the cursor
+  // or selection, scrolling, switching tabs, and the window regaining focus.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeTextDocument(bumpActivity),
+    vscode.window.onDidChangeTextEditorSelection(bumpActivity),
+    vscode.window.onDidChangeActiveTextEditor(bumpActivity),
+    vscode.window.onDidChangeTextEditorVisibleRanges(bumpActivity),
+    vscode.window.onDidChangeWindowState((e) => {
+      if (e.focused) bumpActivity();
+    })
+  );
+
+  const interval = setInterval(() => {
+    checkIdle();
+    render();
+  }, 1000);
   context.subscriptions.push({
     dispose: () => {
       clearInterval(interval);

@@ -2,7 +2,7 @@
   "name": "khayyam-timer",
   "displayName": "Khayyam Timer",
   "description": "A stopwatch in the status bar that tracks how long you work on each project and git branch, with a plain-text report.",
-  "version": "0.0.2",
+  "version": "0.0.6",
   "publisher": "milad-ahmadi",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -43,6 +43,10 @@
         "title": "Khayyam Timer: Start / Pause"
       },
       {
+        "command": "khayyamTimer.finish",
+        "title": "Khayyam Timer: Finish Task (stop & add description)"
+      },
+      {
         "command": "khayyamTimer.reset",
         "title": "Khayyam Timer: Reset"
       },
@@ -54,7 +58,18 @@
         "command": "khayyamTimer.clearHistory",
         "title": "Khayyam Timer: Clear History"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Khayyam Timer",
+      "properties": {
+        "khayyamTimer.idleMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Automatically pause the timer after this many minutes with no activity in VS Code (typing, clicking, scrolling, switching tabs, or regaining focus). It resumes automatically as soon as you're active again."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
